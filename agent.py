@@ -13,10 +13,30 @@ def get_usb_info():
         output = subprocess.check_output(['lsusb']).decode('utf-8')
         for line in output.splitlines():
             parts = line.split()
+            bus_id = parts[1]  # Bus ID (например, 002)
+            device_id = parts[3].rstrip(':')  # Device ID (например, 003)
+
+            # Получаем серийный номер через udevadm
+            serial_number = None
+            if "Linux Foundation" not in line:  # Игнорируем "root hub"
+                try:
+                    udev_output = subprocess.check_output(
+                        ['udevadm', 'info', '--query=all', '--name=/dev/bus/usb/' + bus_id + '/' + device_id]
+                    ).decode('utf-8')
+                    for udev_line in udev_output.splitlines():
+                        if 'ID_SERIAL_SHORT' in udev_line:
+                            serial_number = udev_line.split('=')[1]
+                            break
+                except Exception:
+                    serial_number = None  # Если серийный номер недоступен
+
+            # Формируем информацию об устройстве
+            vendor_id = parts[5].split(':')[0]  # Vendor ID
+            product_id = parts[5].split(':')[1]  # Product ID
             usb_info.append({
                 "device_name": ' '.join(parts[6:]),
-                "serial_number": None,  # Серийный номер может потребовать дополнительных действий
-                "identifiers": ' '.join(parts[:6])
+                "serial_number": serial_number,
+                "identifiers": f"{vendor_id}:{product_id}"
             })
     except Exception as e:
         print(f"Error collecting USB info: {e}")
@@ -26,19 +46,38 @@ def get_usb_info():
 def get_pci_info():
     pci_info = []
     try:
+        # Получаем список PCI-устройств через lspci
         output = subprocess.check_output(['lspci', '-vmm']).decode('utf-8')
         devices = output.strip().split('\n\n')
+
         for device in devices:
             lines = device.splitlines()
             info = {}
             for line in lines:
-                key, value = line.split(':', 1)
-                info[key.strip()] = value.strip()
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    info[key.strip()] = value.strip()
+
+            # Извлекаем Slot (шина:устройство:функция)
+            slot = info.get("Slot", "Unknown")
+            if slot == "Unknown":
+                continue
+
+            # Читаем device_id и subsystem_id из файлов в /sys
+            try:
+                with open(f"/sys/bus/pci/devices/0000:{slot}/device", "r") as f:
+                    device_id = f"0x{f.read().strip()}"
+                with open(f"/sys/bus/pci/devices/0000:{slot}/subsystem_device", "r") as f:
+                    subsystem_id = f"0x{f.read().strip()}"
+            except Exception:
+                device_id = "Unknown"
+                subsystem_id = "Unknown"
+
             pci_info.append({
                 "device_name": info.get("Device", "Unknown"),
-                "bus_number": info.get("Slot", "Unknown"),
-                "device_id": info.get("Vendor", "Unknown"),
-                "subsystem_id": info.get("Subsys", "Unknown")
+                "bus_number": slot,
+                "device_id": device_id,
+                "subsystem_id": subsystem_id
             })
     except Exception as e:
         print(f"Error collecting PCI info: {e}")
@@ -48,13 +87,19 @@ def get_pci_info():
 def get_scsi_info():
     scsi_info = []
     try:
-        output = subprocess.check_output(['lsscsi', '-l']).decode('utf-8')
-        for line in output.splitlines():
-            parts = line.split()
+        # Используем lsblk для получения данных о SCSI-устройствах
+        output = subprocess.check_output(['lsblk', '-o', 'TYPE,SIZE,SERIAL,MODEL', '--json']).decode('utf-8')
+        data = json.loads(output)
+
+        for device in data.get("blockdevices", []):
+            # Игнорируем разделы (только физические устройства)
+            if device.get("type") != "disk":
+                continue
+
             scsi_info.append({
-                "device_name": ' '.join(parts[3:]),
-                "serial_number": parts[-1] if len(parts) > 1 else "Unknown",
-                "size": parts[-2] if len(parts) > 2 else "Unknown"
+                "device_name": device.get("model", "Unknown"),
+                "serial_number": device.get("serial", "Unknown"),
+                "size": device.get("size", "Unknown")
             })
     except Exception as e:
         print(f"Error collecting SCSI info: {e}")
@@ -64,19 +109,27 @@ def get_scsi_info():
 def get_cpu_info():
     cpu_info = []
     try:
-        with open('/proc/cpuinfo') as f:
-            data = f.read()
-            for processor in data.split('\n\n'):
-                info = {}
-                for line in processor.splitlines():
-                    if ':' in line:
-                        key, value = line.split(':', 1)
-                        info[key.strip()] = value.strip()
-                cpu_info.append({
-                    "device_name": info.get("model name", "Unknown"),
-                    "serial_number": info.get("serial", "Unknown"),
-                    "batch_number": info.get("stepping", "Unknown")
-                })
+        # Используем dmidecode для сбора информации о CPU
+        output = subprocess.check_output(['dmidecode', '-t', 'processor']).decode('utf-8')
+        blocks = output.strip().split('\n\n')
+
+        for block in blocks:
+            info = {}
+            for line in block.splitlines():
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    info[key.strip()] = value.strip()
+
+            # Проверяем, есть ли значимая информация в блоке
+            if not any(info.get(field) and info[field] != "Unknown" for field in ["Version", "Serial Number", "Part Number"]):
+                continue
+
+            # Формируем информацию о CPU
+            cpu_info.append({
+                "device_name": info.get("Version", "Unknown"),
+                "serial_number": info.get("Serial Number", "Unknown"),
+                "batch_number": info.get("Part Number", "Unknown")
+            })
     except Exception as e:
         print(f"Error collecting CPU info: {e}")
     return cpu_info
@@ -85,17 +138,31 @@ def get_cpu_info():
 def get_memory_info():
     memory_info = []
     try:
+        # Используем dmidecode для сбора информации о RAM
         output = subprocess.check_output(['dmidecode', '-t', 'memory']).decode('utf-8')
-        for block in output.split("\n\n"):
+        blocks = output.strip().split('\n\n')
+
+        for block in blocks:
             if "Memory Device" in block:
                 info = {}
                 for line in block.splitlines():
                     if ":" in line:
                         key, value = line.split(":", 1)
                         info[key.strip()] = value.strip()
+
+                # Если серийный номер равен "0x00000000", заменяем его на "Unknown"
+                serial_number = info.get("Serial Number", "Unknown")
+                if serial_number == "0x00000000":
+                    serial_number = "Unknown"
+
+                # Формируем название устройства
+                device_name = f"{info.get('Manufacturer', 'Unknown')} " \
+                              f"{info.get('Form Factor', 'Unknown')} " \
+                              f"{info.get('Type', 'Unknown')}"
+
                 memory_info.append({
-                    "device_name": info.get("Type", "Unknown"),
-                    "serial_number": info.get("Serial Number", "Unknown"),
+                    "device_name": device_name,
+                    "serial_number": serial_number,
                     "batch_number": info.get("Part Number", "Unknown"),
                     "size": info.get("Size", "Unknown")
                 })
@@ -133,12 +200,6 @@ def monitor_udev_events():
     for device in iter(monitor.poll, None):
         event = device.action  # 'add' или 'remove'
         subsystem = device.subsystem  # 'usb', 'pci', 'scsi', 'cpu', 'memory'
-
-        # Проверяем, является ли устройство основным (не интерфейсом или драйвером)
-        if subsystem == "usb":
-            devtype = device.get("DEVTYPE", None)
-            if devtype and devtype != "usb_device":  # Игнорируем интерфейсы и другие подкомпоненты
-                continue
 
         # Уникальный идентификатор устройства
         device_id = f"{subsystem}:{device.device_path}"
