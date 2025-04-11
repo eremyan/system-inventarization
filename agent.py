@@ -194,44 +194,34 @@ def monitor_udev_events():
 
     monitor.start()
 
-    # Словарь для отслеживания отправленных устройств
-    sent_devices = set()
-
-    for device in iter(monitor.poll, None):
-        event = device.action  # 'add' или 'remove'
-        subsystem = device.subsystem  # 'usb', 'pci', 'scsi', 'cpu', 'memory'
-
-        # Уникальный идентификатор устройства
-        device_id = f"{subsystem}:{device.device_path}"
-
-        # Проверяем, было ли устройство уже отправлено
-        if device_id in sent_devices and event != 'remove':
-            print(f"Device {device_id} already sent. Skipping duplicate.")
+    while True:
+        device = monitor.poll(timeout=None)
+        if device is None:
             continue
 
-        # Собираем информацию об устройстве
-        device_info = {
-            "device_name": device.get("ID_MODEL", "Unknown"),
-            "serial_number": device.get("ID_SERIAL_SHORT", "Unknown"),
-            "identifiers": f"{device.get('ID_VENDOR_ID', 'Unknown')}:{device.get('ID_MODEL_ID', 'Unknown')}"
+        event = device.action  # 'add', 'remove', 'unbind'
+        subsystem = device.subsystem  # 'usb', 'pci', 'scsi', 'cpu', 'memory'
+
+        # Собираем текущий список устройств
+        current_devices = {
+            "usb": get_usb_info(),
+            "pci": get_pci_info(),
+            "scsi": get_scsi_info(),
+            "cpu": get_cpu_info(),
+            "memory": get_memory_info(),
+            "timestamp": datetime.now().isoformat()
         }
 
         # Формируем данные для отправки
         data = {
             "event": event,
             "device_type": subsystem,
-            "device_info": device_info,
+            "current_devices": current_devices,
             "timestamp": datetime.now().isoformat()
         }
 
         # Отправляем данные менеджеру
         send_data_to_manager(data)
-
-        # Добавляем устройство в список отправленных
-        if event == 'add':
-            sent_devices.add(device_id)
-        elif event == 'remove':
-            sent_devices.discard(device_id)
 
 # Основная функция агента
 def main():
