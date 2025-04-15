@@ -19,10 +19,8 @@ if not es.ping():
     exit(1)
 else:
     print("Connected to Elasticsearch successfully.")
-    
-INDEX_NAME = "hardware_data"  # Имя индекса для хранения данных
 
-es = Elasticsearch([ELASTICSEARCH_HOST])
+INDEX_NAME = "computer_data"  # Имя индекса для хранения данных
 
 # Функция для сохранения данных в файл
 def save_data_to_file(data):
@@ -39,18 +37,17 @@ def save_data_to_file(data):
         json.dump(data, f, indent=4)
     print(f"Data saved to {filename}")
 
-# Функция для сохранения данных в Elasticsearch
-def save_device_to_elasticsearch(device_type, device_data, timestamp):
+# Функция для сохранения данных о компьютере в Elasticsearch
+def save_computer_to_elasticsearch(computer_id, computer_data, timestamp):
     try:
         # Генерация уникального ID для документа
-        unique_id = device_data.get('identifiers', device_data.get('serial_number', 'unknown'))
-        doc_id = f"{timestamp}_{device_type}_{unique_id}"
+        doc_id = f"{timestamp}_{computer_id}"
         
         # Создание документа для Elasticsearch
         document = {
-            "device_type": device_type,
-            "device_data": device_data,
-            "timestamp": timestamp
+            "computer_id": computer_id,
+            "timestamp": timestamp,
+            "devices": computer_data
         }
         
         # Отправка данных в Elasticsearch
@@ -98,17 +95,14 @@ def main():
                     print("Missing 'timestamp' in received data")
                     continue
                 
-                # Перебираем все типы устройств
-                for device_type, devices in parsed_data.items():
-                    if device_type == "timestamp":
-                        continue  # Пропускаем ключ "timestamp"
-                    
-                    # Обрабатываем устройства каждого типа
-                    for device in devices:
-                        try:
-                            save_device_to_elasticsearch(device_type, device, timestamp)
-                        except Exception as e:
-                            print(f"Failed to process device of type '{device_type}': {e}")
+                # Генерация уникального идентификатора компьютера
+                computer_id = f"{addr[0]}"  # Используем IP-адрес клиента как идентификатор компьютера
+                
+                # Удаляем ключ "timestamp" из данных устройств
+                devices_data = {key: value for key, value in parsed_data.items() if key != "timestamp"}
+                
+                # Сохранение данных о компьютере в Elasticsearch
+                save_computer_to_elasticsearch(computer_id, devices_data, timestamp)
                 
                 # Сохранение данных в файл
                 save_data_to_file(parsed_data)
