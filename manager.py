@@ -2,9 +2,30 @@ import socket
 import json
 from datetime import datetime
 import os
+from elasticsearch import Elasticsearch
+
+# Подключение к Elasticsearch
+ELASTICSEARCH_HOST = "http://172.19.0.2:9200"
+
+es = Elasticsearch(
+    [ELASTICSEARCH_HOST],
+    request_timeout=30,
+    retry_on_timeout=True
+)
+
+# Проверка подключения
+if not es.ping():
+    print("Elasticsearch is not running or connection failed.")
+    exit(1)
+else:
+    print("Connected to Elasticsearch successfully.")
+    
+INDEX_NAME = "hardware_data"  # Имя индекса для хранения данных
+
+es = Elasticsearch([ELASTICSEARCH_HOST])
 
 # Функция для сохранения данных в файл
-def save_data(data):
+def save_data_to_file(data):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     filename = f"data_{timestamp}.json"
     
@@ -17,6 +38,26 @@ def save_data(data):
     with open(filename, "w") as f:
         json.dump(data, f, indent=4)
     print(f"Data saved to {filename}")
+
+# Функция для сохранения данных в Elasticsearch
+def save_device_to_elasticsearch(device_type, device_data, timestamp):
+    try:
+        # Генерация уникального ID для документа
+        unique_id = device_data.get('identifiers', device_data.get('serial_number', 'unknown'))
+        doc_id = f"{timestamp}_{device_type}_{unique_id}"
+        
+        # Создание документа для Elasticsearch
+        document = {
+            "device_type": device_type,
+            "device_data": device_data,
+            "timestamp": timestamp
+        }
+        
+        # Отправка данных в Elasticsearch
+        response = es.index(index=INDEX_NAME, id=doc_id, document=document)
+        print(f"Data saved to Elasticsearch. Response: {response}")
+    except Exception as e:
+        print(f"Error saving data to Elasticsearch: {e}")
 
 # Основная функция менеджера
 def main():
@@ -49,7 +90,29 @@ def main():
             # Разбор JSON
             try:
                 parsed_data = json.loads(raw_data)
-                save_data(parsed_data)
+                print(f"Received data: {parsed_data}")  # Логируем полученные данные
+                
+                # Проверяем наличие временной метки
+                timestamp = parsed_data.get('timestamp')
+                if not timestamp:
+                    print("Missing 'timestamp' in received data")
+                    continue
+                
+                # Перебираем все типы устройств
+                for device_type, devices in parsed_data.items():
+                    if device_type == "timestamp":
+                        continue  # Пропускаем ключ "timestamp"
+                    
+                    # Обрабатываем устройства каждого типа
+                    for device in devices:
+                        try:
+                            save_device_to_elasticsearch(device_type, device, timestamp)
+                        except Exception as e:
+                            print(f"Failed to process device of type '{device_type}': {e}")
+                
+                # Сохранение данных в файл
+                save_data_to_file(parsed_data)
+            
             except json.JSONDecodeError as e:
                 print(f"Error decoding JSON: {e}")
                 print(f"Raw data received: {raw_data[:100]}...")  # Вывод первых 100 символов для отладки
